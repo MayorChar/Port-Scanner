@@ -1,0 +1,142 @@
+import socket
+import threading
+import argparse
+import time
+import csv
+import json
+from datetime import datetime
+
+# Well-known ports database (partial)
+SERVICES = {
+    20: "FTP-DATA", 21: "FTP", 22: "SSH", 23: "TELNET",
+    25: "SMTP", 53: "DNS", 80: "HTTP", 110: "POP3",
+    143: "IMAP", 443: "HTTPS", 3389: "RDP"
+}
+
+def scan_port(target, port, timeout=1.0):
+    """Attempt connection to target port with timeout"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            return s.connect_ex((target, port)) == 0
+    except:
+        return False
+
+def worker(target, ports, timeout, results, progress):
+    """Thread worker for port scanning"""
+    while ports:
+        port = ports.pop(0)
+        if scan_port(target, port, timeout):
+            service = SERVICES.get(port, "unknown")
+            results.append((port, service))
+        with progress_lock:
+            progress[0] += 1
+
+def main():
+    parser = argparse.ArgumentParser(description="Python Port Scanner")
+    parser.add_argument("target", help="IP or domain to scan")
+    parser.add_argument("-p", "--ports", default="1-1024", 
+                        help="Port range (e.g. 1-1000)")
+    parser.add_argument("-t", "--threads", type=int, default=100,
+                        help="Number of threads")
+    parser.add_argument("-T", "--timeout", type=float, default=1.0,
+                        help="Connection timeout in seconds")
+    parser.add_argument("-o", "--output", 
+                        help="Export results (JSON/CSV/TXT)")
+    args = parser.parse_args()
+
+    # Parse port range
+    if '-' in args.ports:
+        start, end = map(int, args.ports.split('-'))
+    else:
+        start = end = int(args.ports)
+    port_range = list(range(start, end + 1))
+    total_ports = len(port_range)
+
+    # Resolve target
+    try:
+        target_ip = socket.gethostbyname(args.target)
+    except socket.gaierror:
+        print(f"Error: Cannot resolve '{args.target}'")
+        return
+
+    print(f"Scanning {args.target} ({target_ip})")
+    print(f"Ports: {start}-{end} | Threads: {args.threads} | Timeout: {args.timeout}s\n")
+    
+    results = []
+    progress = [0]
+    progress_lock = threading.Lock()
+    threads = []
+
+    start_time = time.time()
+    
+    # Create threads
+    for _ in range(args.threads):
+        t = threading.Thread(
+            target=worker, 
+            args=(target_ip, port_range, args.timeout, results, progress)
+        )
+        t.daemon = True
+        t.start()
+        threads.append(t)
+    
+    # Progress monitoring
+    try:
+        while progress[0] < total_ports:
+            percent = (progress[0] / total_ports) * 100
+            print(f"\rProgress: {progress[0]}/{total_ports} ({percent:.1f}%)", end='')
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        print("\n\nScan aborted!")
+        return
+    
+    for t in threads:
+        t.join()
+    
+    duration = time.time() - start_time
+    print(f"\n\nScan completed in {duration:.2f} seconds")
+    
+    # Display results
+    results.sort()
+    if results:
+        print("\nOPEN PORTS:")
+        for port, service in results:
+            print(f"• Port {port}/TCP - {service}")
+    else:
+        print("No open ports found")
+    
+    # Export results
+    if args.output:
+        export_results(results, args.output)
+
+def export_results(data, filename):
+    """Export scan results to file"""
+    ext = filename.split('.')[-1].lower()
+    
+    try:
+        if ext == 'json':
+            with open(filename, 'w') as f:
+                json.dump({
+                    "generated": datetime.now().isoformat(),
+                    "results": [{"port": p, "service": s} for p,s in data]
+                }, f, indent=2)
+                
+        elif ext == 'csv':
+            with open(filename, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Port", "Service"])
+                writer.writerows(data)
+                
+        else:  # txt
+            with open(filename, 'w') as f:
+                f.write("Port Scanner Results\n")
+                f.write(f"Generated: {datetime.now()}\n\n")
+                for port, service in data:
+                    f.write(f"Port {port}/TCP - {service}\n")
+                    
+        print(f"\nResults exported to {filename}")
+    except Exception as e:
+        print(f"Export error: {str(e)}")
+
+if __name__ == "__main__":
+    main()
